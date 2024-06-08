@@ -303,7 +303,6 @@ func ManageOrderBook(ob *OrderBook, snapEndpoint string, ch <-chan *retrievers.B
 		}
 		if lastUpdateID != event.PrevUpdateID {
 			log.Println("Previous id missmatch, syncing...")
-			cleanBuffer(ob, ch)
 			lastUpdateID, err = ob.fetch(snapEndpoint)
 			if err != nil {
 				log.Fatal(err)
