@@ -28,7 +28,7 @@ func NewBinanceRetriever(endpoint string) *BinanceRetriever {
 	}
 }
 
-func (r *BinanceRetriever) Stream() {
+func (r *BinanceRetriever) Stream(closeChan chan any) {
 	for {
 		log.Printf("Connecting to %s", r.EndpointWS)
 
@@ -46,21 +46,27 @@ func (r *BinanceRetriever) Stream() {
 		var response BinanceDepthResponse
 
 		for {
-			start := time.Now()
-			if err := conn.ReadJSON(&response); err != nil {
-				log.Println("ReadJSON:", err)
-				log.Println("Reconnecting...")
-				time.Sleep(time.Second * 2) // Simple backoff strategy
-				break
-			} else {
-				if response.FinalUpdateID == 0 {
-					log.Println("Reconnecting due to invalid update ID")
-					time.Sleep(time.Second * 2)
+			select {
+			case <-closeChan:
+				log.Println("closing websocket connection")
+				return
+			default:
+				start := time.Now()
+				if err := conn.ReadJSON(&response); err != nil {
+					log.Println("ReadJSON:", err)
+					log.Println("Reconnecting...")
+					time.Sleep(time.Second * 2) // Simple backoff strategy
 					break
+				} else {
+					if response.FinalUpdateID == 0 {
+						log.Println("Reconnecting due to invalid update ID")
+						time.Sleep(time.Second * 2)
+						break
+					}
+					end := time.Now()
+					response.Latency = end.Sub(start)
+					r.Buffer <- &response
 				}
-				end := time.Now()
-				response.Latency = end.Sub(start)
-				r.Buffer <- &response
 			}
 		}
 	}

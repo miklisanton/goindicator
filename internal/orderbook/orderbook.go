@@ -6,6 +6,7 @@ import (
 	"github.com/emirpasic/gods/maps/treemap"
 	"github.com/emirpasic/gods/utils"
 	"goindicator/internal/config"
+	rate "goindicator/internal/ratelimiter"
 	"goindicator/internal/retrievers"
 	"io"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"time"
 )
 
 var (
@@ -29,14 +31,16 @@ type OrderBook struct {
 	Mu       sync.Mutex
 	Asks     *treemap.Map
 	Bids     *treemap.Map
+	symbol   string
 	tickSize float64
 }
 
-func NewOrderBook(tickSize float64) *OrderBook {
+func NewOrderBook(symbol string, tickSize float64) *OrderBook {
 	return &OrderBook{
 		Bids:     treemap.NewWith(utils.Float64Comparator),
 		Asks:     treemap.NewWith(utils.Float64Comparator),
 		tickSize: tickSize,
+		symbol:   symbol,
 	}
 }
 
@@ -122,12 +126,22 @@ func (ob *OrderBook) RoundDownToTickSize(price float64) float64 {
 func (ob *OrderBook) RoundUpToTickSize(price float64) float64 {
 	return math.Ceil(price/ob.tickSize) * ob.tickSize
 }
-func (ob *OrderBook) fetch(endpoint string) (int, error) {
+
+func (ob *OrderBook) fetch(endpoint string, rl *rate.Limiter) (int, error) {
 	ob.Mu.Lock()
 	defer ob.Mu.Unlock()
 	fetchingBook = true
 	log.Println("Fetching orderbook ", endpoint)
-	resp, err := http.Get(endpoint)
+
+	rateLimitedGet := func(url string, weight int) (*http.Response, error) {
+		for !rl.Allow(weight) {
+			time.Sleep(10 * time.Second)
+		}
+		return http.Get(url)
+	}
+
+	resp, err := rateLimitedGet(endpoint, 20)
+
 	if err != nil {
 		return -1, fmt.Errorf("Error fetching orderbook: %s\n", err)
 	}
@@ -282,47 +296,53 @@ func cleanBuffer(ob *OrderBook, ch <-chan *retrievers.BinanceDepthResponse) {
 	}
 }
 
-func ManageOrderBook(ob *OrderBook, snapEndpoint string, ch <-chan *retrievers.BinanceDepthResponse) {
+func ManageOrderBook(ob *OrderBook, snapEndpoint string, ch <-chan *retrievers.BinanceDepthResponse, rl *rate.Limiter, closeChan chan any) {
 	cleanBuffer(ob, ch)
-	lastUpdateID, err := ob.fetch(snapEndpoint)
+	lastUpdateID, err := ob.fetch(snapEndpoint, rl)
 	afterFetch := true
 	if err != nil {
 		log.Fatal(err)
 	}
 	for event := range ch {
-		if event.FinalUpdateID < lastUpdateID {
-			log.Println("Dropping event ", event.FinalUpdateID)
-			continue
-		}
-		if afterFetch && event.FirstUpdateID <= lastUpdateID && event.FinalUpdateID >= lastUpdateID {
-			log.Println("First update after fetch")
-			lastUpdateID = event.FinalUpdateID
-			ob.update(event)
-			afterFetch = false
-			continue
-		}
-		if lastUpdateID != event.PrevUpdateID {
-			log.Println("Previous id missmatch, syncing...")
-			lastUpdateID, err = ob.fetch(snapEndpoint)
-			if err != nil {
-				log.Fatal(err)
+		select {
+		case <-closeChan:
+			log.Println("shutting down orderbook manager for", ob.symbol)
+			break
+		default:
+			if event.FinalUpdateID < lastUpdateID {
+				log.Println("Dropping event ", event.FinalUpdateID)
+				continue
 			}
-			fetchingBook = false
-			afterFetch = true
-		} else if !fetchingBook {
-			// Update is in correct order
-			if event.Latency >= 2*config.UpdateTime {
-				// Fetch if update took too long
-				log.Println("Too long update response from ws, syncing...")
-				lastUpdateID, err = ob.fetch(snapEndpoint)
+			if afterFetch && event.FirstUpdateID <= lastUpdateID && event.FinalUpdateID >= lastUpdateID {
+				log.Println("First update after fetch")
+				lastUpdateID = event.FinalUpdateID
+				ob.update(event)
+				afterFetch = false
+				continue
+			}
+			if lastUpdateID != event.PrevUpdateID {
+				log.Println("Previous id missmatch, syncing...")
+				lastUpdateID, err = ob.fetch(snapEndpoint, rl)
 				if err != nil {
 					log.Fatal(err)
 				}
 				fetchingBook = false
 				afterFetch = true
-			} else {
-				ob.update(event)
-				lastUpdateID = event.FinalUpdateID
+			} else if !fetchingBook {
+				// Update is in correct order
+				if event.Latency >= 2*config.UpdateTime {
+					// Fetch if update took too long
+					log.Println("Too long update response from ws, syncing...")
+					lastUpdateID, err = ob.fetch(snapEndpoint, rl)
+					if err != nil {
+						log.Fatal(err)
+					}
+					fetchingBook = false
+					afterFetch = true
+				} else {
+					ob.update(event)
+					lastUpdateID = event.FinalUpdateID
+				}
 			}
 		}
 	}
