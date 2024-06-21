@@ -44,7 +44,7 @@ func (t *Tracker) Run(out chan *bot_api.Notification) {
 	go orderbook.ManageOrderBook(t.ob, t.snapEndpoint, t.ret.Buffer, t.rl, t.closeChan)
 
 	now := time.Now()
-	next := now.Truncate(time.Second).Add(time.Second)
+	next := now.Truncate(time.Minute).Add(time.Minute)
 	timer := time.NewTimer(time.Until(next))
 
 	go func() {
@@ -55,7 +55,7 @@ func (t *Tracker) Run(out chan *bot_api.Notification) {
 			log.Println("shutting down tracker for", t.symbol)
 			return
 		}
-		minuteTicker := time.NewTicker(time.Second)
+		minuteTicker := time.NewTicker(time.Minute)
 
 		bestBidPrice, _, _ := t.ob.GetBestBid()
 		bid := t.ob.RoundDownToTickSize(bestBidPrice)
